@@ -1,35 +1,14 @@
 import tensorflow as tf
 import tensorflow_hub as hub
 import numpy as np
-import json
-
-from PIL import Image, ImageDraw, ImageFont
+import cv2
+from PIL import Image, ImageDraw
+from mss import mss
+import time
 
 # Load the pre-trained object detection model
 model_url = "https://tfhub.dev/tensorflow/ssd_mobilenet_v2/2"
 model = hub.load(model_url)
-
-# Function to preprocess the image
-def preprocess_image(image_path):
-    img = tf.io.read_file(image_path)
-    img = tf.image.decode_image(img, channels=3)
-    img = tf.image.convert_image_dtype(img, tf.uint8)
-    return img
-
-# Path to the input image
-image_path = "/Users/sofianurobert/Projects/tensorflow/images/aa.jpeg" # UPDATE WITH YOUR LOCAL PATH
-input_image = preprocess_image(image_path)
-
-# Add batch dimension
-input_tensor = tf.expand_dims(input_image, axis=0)
-
-# Perform object detection
-detector_output = model(input_tensor)
-
-# Extract detection results
-boxes = detector_output['detection_boxes'][0].numpy()
-scores = detector_output['detection_scores'][0].numpy()
-classes = detector_output['detection_classes'][0].numpy().astype(np.int32)
 
 # COCO labels
 coco_labels = {
@@ -47,12 +26,20 @@ coco_labels = {
     88: 'teddy bear', 89: 'hair drier', 90: 'toothbrush'
 }
 
+# Function to preprocess the image
+def preprocess_frame(frame):
+    frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
+    img = tf.convert_to_tensor(frame, dtype=tf.uint8)
+    img = tf.image.resize(img, (300, 300), method=tf.image.ResizeMethod.BILINEAR)
+    img = tf.cast(img, tf.uint8)  # Ensure the image is uint8 after resizing
+    img = tf.expand_dims(img, axis=0)
+    return img
+
 # Function to draw bounding boxes on the image
 def draw_boxes(image, boxes, scores, classes, labels, score_threshold=0.5):
-    image = np.array(image)
-    height, width, _ = image.shape
     image = Image.fromarray(image)
     draw = ImageDraw.Draw(image)
+    width, height = image.size
     
     for i in range(len(boxes)):
         if scores[i] >= score_threshold:
@@ -62,22 +49,48 @@ def draw_boxes(image, boxes, scores, classes, labels, score_threshold=0.5):
             label = labels.get(classes[i], 'N/A')
             draw.text((xmin, ymin), f"{label}: {scores[i]:.2f}", fill='red')
     
-    return image
+    return np.array(image)
 
-# Draw bounding boxes on the original image
-output_image = draw_boxes(input_image, boxes, scores, classes, coco_labels)
+# Capture and process frames in real-time
+with mss() as sct:
+    monitor = sct.monitors[0]  # Use the first monitor
+    while True:
+        start_time = time.time()
+        screenshot = sct.grab(monitor)
+        frame = np.array(screenshot)
 
-# Print detected objects
-for i in range(len(boxes)):
-    if scores[i] >= 0.5:
-        ymin, xmin, ymax, xmax = boxes[i]
-        label = coco_labels.get(classes[i], 'N/A')
-        print(f"Object: {label}, Score: {scores[i]:.2f}, Box: ({ymin:.2f}, {xmin:.2f}, {ymax:.2f}, {xmax:.2f})")
+        # Preprocess the frame
+        input_tensor = preprocess_frame(frame)
 
+        # Perform object detection
+        detector_output = model(input_tensor)
 
+        # Extract detection results
+        boxes = detector_output['detection_boxes'][0].numpy()
+        scores = detector_output['detection_scores'][0].numpy()
+        classes = detector_output['detection_classes'][0].numpy().astype(np.int32)
 
-# Save and display the resulting image
-output_image_path = "/Users/sofianurobert/Projects/tensorflow/result images/output_image.jpg"
-output_image.save(output_image_path)
+        # Draw bounding boxes on the frame
+        annotated_frame = draw_boxes(frame, boxes, scores, classes, coco_labels)
 
-print(f"Annotated image saved to {output_image_path}")
+        # Display the resulting frame
+        cv2.imshow('Object Detection', annotated_frame)
+
+        # Print detected objects
+        for i in range(len(boxes)):
+            if scores[i] >= 0.5:
+                ymin, xmin, ymax, xmax = boxes[i]
+                label = coco_labels.get(classes[i], 'N/A')
+                print(f"Object: {label}, Score: {scores[i]:.2f}, Box: ({ymin:.2f}, {xmin:.2f}, {ymax:.2f}, {xmax:.2f})")
+
+        # Exit on 'q' key
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+        # Calculate and print FPS
+        end_time = time.time()
+        fps = 1 / (end_time - start_time)
+        print(f"FPS: {fps:.2f}")
+
+# Release everything if job is finished
+cv2.destroyAllWindows()
